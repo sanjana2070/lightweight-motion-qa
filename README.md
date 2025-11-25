@@ -37,6 +37,10 @@ Build a lightweight Motion QA system that can answer simple, interpretable quest
 5. Use a **planner** to choose which tool to apply for a given question.
 6. Use an **answerer** to turn numeric output into human-readable text.
 
+
+**Output Screens:**
+![alt text](<2D Plot of Root Trajectory-1.png>)
+![alt text](QuestionAnswer-1.png)
 ---
 
 ## 2. Current Capabilities
