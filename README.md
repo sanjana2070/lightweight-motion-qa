@@ -1,4 +1,3 @@
-````markdown
 # Lightweight Motion-QA: LLM-Guided Question Answering over 3D Human Motion
 
 > **CPU-only prototype** that answers natural-language questions about 3D human motion using simple PyTorch motion analysis + an LLM planner and explainer.  
@@ -405,9 +404,3 @@ For details, please see the official project pages and papers for BABEL, HumanMo
 
 ---
 
-```
-
----
-
-
-```
