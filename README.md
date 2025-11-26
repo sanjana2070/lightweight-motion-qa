@@ -23,6 +23,9 @@ A small project that lets you **ask questions about human movement** over short 
 ## Output Video
 ![alt text](<MotionQA Demo.gif>)
 
+## Flowchart
+![alt text](Flowchart.png)
+
 ## Rough architecture
 
 - `motion_qa/`
