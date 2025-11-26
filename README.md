@@ -1,354 +1,192 @@
-# Lightweight Motion QA (CPU-Only Prototype)
+> Built a CPU-only Motion Question Answering prototype on 3D motion data and raw videos.  
+> Implemented a pipeline that extracts root trajectories from AMASS CMU `.npz` files and MediaPipe Pose, computes interpretable motion features (displacement, duration, sit events), and answers natural language questions via a modular toolbox of motion-analysis functions (dominant direction, sit counts, displacement, movement category, clip duration). Exposed the system via a CLI over an AMASS/BABEL-style subset and a Gradio-based web app that supports video uploads, with optional LLM-based planning/answering.
+# Lightweight Motion QA
+A small, **CPU-friendly Motion Question Answering system** that can:
 
-A small, **CPU-friendly Motion Question Answering system** built on top of 3D human motion data (AMASS CMU subset).  
-
-You can:
-
-- Load motion clips from AMASS (CMU, SMPL+H G).
-- Preprocess them into a simple internal format.
-- Ask questions like:
+- Analyze **3D motion clips** derived from AMASS (CMU subset) via a CLI.
+- Analyze **short human-movement videos** (via MediaPipe Pose) through a **web UI**.
+- Answer simple questions like:
   - *“Does the person move more forward or sideways?”*
   - *“How many times does the person sit down?”*
   - *“How far does the person travel?”*
   - *“Does the person mostly stay in place, or move a lot?”*
-  - *“How long is this clip in seconds?”*
-- Interact via a **terminal UI**, with an optional 2D visualization of the root trajectory.
+  - *“How long is this motion clip in seconds?”*
 
-By default, the system runs entirely **offline** without any LLM calls. An optional OpenAI-based planner/answerer path is wired in but disabled with a config flag.
+By default, everything runs **offline on CPU** using hand-crafted motion features and simple rule-based logic.  
+There are optional hooks for LLM-based planning/answering (OpenAI API), controlled via a config flag.
 
 ---
 
-## 1. High-Level Overview
+## 1. Project Overview
 
 **Goal:**  
-Build a lightweight Motion QA system that can answer simple, interpretable questions about 3D human motion clips, with:
+Build a lightweight Motion QA system that:
 
-- No training loop (yet),
-- No GPU,
-- Simple, modular motion-analysis functions,
-- A clean path to plug in LLMs later for planning / answering.
+- Works on **3D motion data** (AMASS/BABEL-style) and on **raw videos**.
+- Stays **GPU-free** and relatively simple.
+- Uses modular motion-analysis tools.
 
-**Core idea:**
+### Core pipeline
 
-1. Use AMASS CMU `.npz` files as input.
-2. Extract a **root joint trajectory** for each motion (using the `trans` field → `(T, 1, 3)`).
-3. Compute hand-crafted motion features.
-4. Run small **tool modules** (e.g., `dominant_direction`, `count_sit_events`, etc.).
-5. Use a **planner** to choose which tool to apply for a given question.
-6. Use an **answerer** to turn numeric output into human-readable text.
+Regardless of source (AMASS or video):
 
+1. **Motion Representation**  
+   Motion is represented as a tensor of shape `(T, J, 3)`:
+   - `T` = number of frames
+   - `J` = number of joints (currently `J=1` → only the root)
+   - `3` = `(x, y, z)` coordinates
 
-**Output Screens:**
-![alt text](<2D Plot of Root Trajectory-1.png>)
-![alt text](QuestionAnswer-1.png)
----
+2. **Feature Extraction** (`motion_qa/features.py`)  
+   - `compute_basic_features`: root displacement, per-joint path length, etc.
+   - `compute_features_with_events`: adds event-like features (e.g., sit events).
 
-## 2. Current Capabilities
+3. **Motion Modules** (`motion_qa/modules.py`)  
+   Interpretable tools that run on `(motion, features)`:
+   - `dominant_direction`
+   - `count_sit_events`
+   - `global_displacement`
+   - `displacement_category`
+   - `clip_duration`
+   - `most_active_limb` (more meaningful once multi-joint skeletons are used)
 
-### Motion analysis tools (`motion_qa/modules.py`)
+4. **Planner** (`motion_qa/planner.py`)  
+   Chooses which tool to call given a natural language question:
+   - `plan_from_question` – heuristic keyword-based (default).
+   - `plan_from_question_llm` – optional OpenAI-based planner.
 
-Each tool takes `(motion, features, params)` and returns a dictionary like:
+5. **Answerer** (`motion_qa/answerer.py`)  
+   Turns raw numeric results into human-readable text:
+   - `format_answer` – rule-based (default).
+   - `answer_with_llm` – optional OpenAI-based answerer.
 
-```python
-{
-  "type": "categorical" | "scalar" | "count",
-  "value": ...,
-  "details": {...}
-}
-````
+6. **Interfaces**
+   - **CLI app** (`scripts/cli_app.py`) for exploring AMASS-derived clips.
+   - **Web app** (`scripts/app_web.py`) for uploading **videos** and asking questions in the browser.
 
-Implemented tools:
-
-* `dominant_direction`
-
-  * Uses root displacement to decide if the motion is mostly:
-
-    * `forward`, `backward`, `left`, `right`, or `stationary`.
-* `count_sit_events`
-
-  * Uses root/hip height over time to count sit/squat-like events.
-* `global_displacement`
-
-  * Computes how far the root moves: `||end - start||` (a scalar distance).
-* `displacement_category`
-
-  * Classifies movement amount as:
-
-    * `stationary`, `small`, `medium`, or `large`.
-* `clip_duration`
-
-  * Computes clip length in seconds given a frame rate.
-* `most_active_limb` (currently more of a stub)
-
-  * Uses per-joint path lengths and `JOINT_GROUPS` to decide which limb moves the most.
-  * Fully meaningful once the project is extended to use multi-joint skeletons instead of root-only.
-
-### Features (`motion_qa/features.py`)
-
-* `compute_basic_features(motion)`
-
-  * Root displacement, per-joint path lengths, etc.
-* `compute_features_with_events(motion, fps, hip_index)`
-
-  * Builds on the basic features and adds:
-
-    * `sit_event_count` and other event-related signals.
-
-### Planning (`motion_qa/planner.py`)
-
-Two planners:
-
-* `plan_from_question(question, tools)` – **heuristic (default)**
-
-  * Uses keyword rules to choose a tool based on the question text.
-  * For example:
-
-    * “sit / squat” → `count_sit_events`
-    * “how far / distance / travel” → `global_displacement`
-    * “stay in place / move a lot” → `displacement_category`
-    * “how long / duration / seconds” → `clip_duration`
-    * “forward / left / direction” → `dominant_direction`
-* `plan_from_question_llm(question, tools, model)` – **optional LLM-based**
-
-  * Uses an OpenAI model to pick a tool and (optionally) params.
-  * Falls back to `plan_from_question` on any error or if LLM is disabled.
-
-### Answering (`motion_qa/answerer.py`)
-
-Two answerers:
-
-* `format_answer(question, tool_name, raw_answer)` – **rule-based (default)**
-
-  * Produces human-readable text like:
-
-    > Q: Does the person move more forward or sideways?
-    > A: The person moves mostly left (left-right displacement=3.16, forward-back=-0.00).
-
-  * Has specific formatting for:
-
-    * `dominant_direction`
-    * `count_sit_events`
-    * `most_active_limb`
-    * `global_displacement`
-    * `displacement_category`
-    * `clip_duration`
-
-* `answer_with_llm(question, tool_name, raw_answer, model)` – **optional**
-
-  * Uses an OpenAI model to turn numeric results into a short explanation.
-  * Falls back to `format_answer` if anything goes wrong or LLM is unavailable.
-
-### Configuration (`motion_qa/config.py`)
-
-Config flag:
-
-```python
-USE_LLM = os.getenv("USE_LLM", "false").lower() == "true"
-```
-
-* When `USE_LLM=false` (default):
-
-  * Planner = heuristic
-  * Answerer = rule-based
-  * No OpenAI calls are made.
-* When `USE_LLM=true`:
-
-  * Planner/answerer try to use OpenAI and fallback on error.
+>  Note: at this stage, there is **no training** loop or learned model; everything is rule-based analytics on motion. The only ML models used are **pretrained** ones (MediaPipe Pose, optional LLM).
 
 ---
 
-## 3. Data Pipeline
+## 2. Repository Structure
 
-### Input data (expected layout)
-
-```text
-data/
-  CMU/               # AMASS CMU subset (SMPL+H G) .npz files
-    01/
-      ...
-    02/
-      ...
-    ...
-  babel/             # BABEL annotation JSONs (not heavily used yet)
-    train.json
-    val.json
-    test.json
-    extra_train.json
-    extra_val.json
-```
-
-Right now, only **AMASS CMU** is actively used; BABEL JSONs are present to keep the folder structure consistent and for future work.
-
-### Preprocessed subset
-
-Script: `scripts/preprocess_babel_subset.py`
-
-* Recursively scans `data/CMU/` for `.npz`.
-* For each file:
-
-  * Loads `joints` if present, otherwise:
-  * Loads `trans` and interprets it as a single root joint → `(T, 1, 3)`.
-* Computes features and generates basic QA for each clip:
-
-  * “Does the person move more forward or sideways?”
-  * “How many times does the person sit down?”
-* Saves:
-
-  * `data/babel_subset/motions/<clip_id>.npy`
-  * `data/babel_subset/metadata.json`:
-
-    ```json
-    [
-      {
-        "id": "babel_clip_0000",
-        "motion_file": "babel_clip_0000.npy",
-        "questions": [
-          {
-            "q": "Does the person move more forward or sideways?",
-            "a": "left",
-            "type": "dominant_direction"
-          },
-          {
-            "q": "How many times does the person sit down?",
-            "a": "0",
-            "type": "count_sit_events"
-          }
-        ]
-      },
-      ...
-    ]
-    ```
-
-This gives the project a tiny, self-contained motion QA dataset that mirrors the idea of BABEL but is generated analytically.
-
----
-
-## 4. Repository Structure
-
-Roughly:
+Rough layout:
 
 ```text
 .
 ├── motion_qa/
 │   ├── __init__.py
-│   ├── config.py
-│   ├── datasets.py
-│   ├── features.py
-│   ├── modules.py
-│   ├── planner.py
-│   └── answerer.py
+│   ├── config.py           # USE_LLM flag, model names, etc.
+│   ├── datasets.py         # MotionQADataset (AMASS/BABEL subset)
+│   ├── features.py         # motion feature computation
+│   ├── modules.py          # motion analysis tools (dominant_direction, etc.)
+│   ├── planner.py          # heuristic + optional LLM-based planning
+│   ├── answerer.py         # rule-based + optional LLM-based answerer
+│   └── video_pose.py       # MediaPipe-based video → motion (T, 1, 3)
 │
 ├── scripts/
-│   ├── preprocess_babel_subset.py
-│   ├── run_demo.py
-│   └── cli_app.py
+│   ├── preprocess_babel_subset.py  # build small AMASS/BABEL-like subset
+│   ├── run_demo.py                 # simple one-clip demo (terminal)
+│   ├── cli_app.py                  # CLI interface over dataset
+│   └── app_web.py                  # Gradio web app: upload video + question
 │
 ├── data/
-│   ├── CMU/           # AMASS CMU .npz files (not committed)
-│   ├── babel/         # BABEL JSON files (not committed)
-│   └── babel_subset/  # Generated subset: motions/ + metadata.json
+│   ├── CMU/               # AMASS CMU .npz files (not committed)
+│   ├── babel/             # BABEL JSON files (optional, not heavily used yet)
+│   └── babel_subset/      # Generated subset: motions/ + metadata.json
 │
-├── .env               # config flags, OpenAI key etc. (not committed)
-├── requirements.txt   # dependencies (torch, numpy, matplotlib, openai, etc.)
-└── README.md          # this file
-```
+├── .env                   # config flags, OpenAI key, etc. (ignored by git)
+├── requirements.txt        # torch, numpy, mediapipe, opencv-python, gradio, ...
+└── README.md               # this file
+````
 
 ---
 
-## 5. Installation
+## 3. Installation
 
-### 5.1. Python & virtual environment
-
-```bash
-# Create and activate a virtual environment
-python -m venv .venv
-source .venv/bin/activate      # on macOS / Linux
-# .venv\Scripts\activate       # on Windows
-```
-
-### 5.2. Install dependencies
-
-Minimal set (example; adjust to your actual `requirements.txt`):
+### 3.1. Python & virtual environment
 
 ```bash
-pip install torch numpy matplotlib python-dotenv openai
+python -m venv venv
+# Windows:
+venv\Scripts\activate
+# macOS / Linux:
+# source venv/bin/activate
 ```
 
-If you maintain a `requirements.txt`, you can instead do:
+### 3.2. Install dependencies
+```bash
+pip install torch numpy matplotlib mediapipe opencv-python gradio python-dotenv openai
+```
 
+Or, if you have `requirements.txt`:
 ```bash
 pip install -r requirements.txt
 ```
 
 ---
 
-## 6. Setup Data
+## 4. Data Setup (AMASS / BABEL Subset)
 
-1. **Download AMASS CMU (SMPL+H G)**
-
-   * Extract such that `.npz` files live under `data/CMU/` (possibly in numbered subfolders like `01/`, `02/`, etc.).
-
-2. (Optional for now) **Download BABEL JSONs**
-
-   * Place them in `data/babel/` with names:
-
-     * `train.json`, `val.json`, `test.json`, `extra_train.json`, `extra_val.json`.
-
-3. Verify:
-
-   ```text
-   data/
-     CMU/
-       01/
-         ... .npz
-       02/
-         ... .npz
-       ...
-     babel/
-       train.json
-       val.json
-       ...
-   ```
-
+This is for the **dataset-based** part (CLI and `run_demo.py`).
+1. **AMASS CMU (SMPL+H G)**
+    
+    - Download the CMU subset of **AMASS** (SMPL+H G version).
+        
+    - Extract all `.npz` such that they live under:
+        
+        ```text
+        data/CMU/01/...
+        data/CMU/02/...
+        ...
+        ```
+        
+2. (**Optional**) **BABEL JSONs**
+    
+    - Download BABEL JSON annotations and put them here:
+        
+        ```text
+        data/babel/train.json
+        data/babel/val.json
+        data/babel/test.json
+        data/babel/extra_train.json
+        data/babel/extra_val.json
+        ```
+        
+    
+    They are not heavily used yet but match the intended structure.
+    
+3. **Preprocess into a lightweight subset**
+    
+    From the project root:
+ ```bash
+    python -m scripts.preprocess_babel_subset
+    ```
+    
+    This will:
+    
+    - Traverse `data/CMU/` for `.npz`.
+    - Extract root joint trajectories (`(T, 1, 3)`) using:
+        - `joints` if available, otherwise
+        - `trans` as a single “root” joint.
+    - Create `data/babel_subset/motions/*.npy`.
+    - Create `data/babel_subset/metadata.json` with pre-generated QA entries.
+    After this, you should see logs like:
+    ```text
+    [info] Found XXX .npz files, selecting ALL of them.
+    [info] Processing data/CMU/01/xxx.npz
+           shape: T=..., J=1
+    ...
+    [done] Wrote metadata for N clips to data/babel_subset/metadata.json
+    ```
 ---
+## 5. Dataset-Based Interfaces
 
-## 7. Usage
-
-### 7.1. Preprocess AMASS into the project’s subset
-
-From the project root:
-
-```bash
-python -m scripts.preprocess_babel_subset
-```
-
-This will:
-
-* Traverse `data/CMU/` for `.npz` files (using `joints` or `trans`).
-* Generate `data/babel_subset/motions/*.npy`.
-* Generate `data/babel_subset/metadata.json`.
-
-You should see logs like:
-
-```text
-[info] Found XXX .npz files, selecting ALL of them.
-[info] Processing data/CMU/01/xxx.npz
-       shape: T=..., J=1
-...
-[done] Wrote metadata for N clips to data/babel_subset/metadata.json
-```
-
----
-
-### 7.2. Simple demo: one clip, one question
-
-`run_demo.py` is a minimal, non-interactive test:
-
+### 5.1. Simple demo (`run_demo.py`)
+Quick one-clip demo in terminal:
 ```bash
 python -m scripts.run_demo
 ```
-
-Example output:
+Sample output:
 
 ```text
 [info] Dataset size: 5
@@ -358,150 +196,109 @@ Example output:
 [info] Question: Does the person move more forward or sideways?
 [config] USE_LLM=False -> using heuristic planner + rule-based answerer.
 [info] Planner chose tool: dominant_direction with params={}
-[info] Raw module output: {'type': 'categorical', 'value': 'left', 'details': {'lr': 3.1560, 'fb': -0.004}}
+[info] Raw module output: {'type': 'categorical', 'value': 'left', 'details': {'lr': 3.16, 'fb': -0.00}}
 
 ------------------------------------------------------------
 Q: Does the person move more forward or sideways?
 A: The person moves mostly left (left-right displacement=3.16, forward-back=-0.00).
 ------------------------------------------------------------
 ```
-
-This shows the full pipeline is working for a single item.
-
 ---
 
-### 7.3. Interactive CLI interface
+## 5. Video-Based Web App
 
-The main interface is the CLI app:
+Upload a small video, ask a question, get an answer in the browser.
 
+### 5.1. Video → Motion (`motion_qa/video_pose.py`)
+
+- Uses **MediaPipe Pose** to extract pose from each frame.
+- Takes the **midpoint of left & right hip** as the “root” joint.
+- Produces an array `(T, 1, 3)` of normalized `(x, y, z)` coordinates in image space.
+- This motion representation is then fed into the same feature + module pipeline as AMASS.
+
+### 5.2. Web App (`scripts/app_web.py`)
+
+Launch the web UI:
 ```bash
-python -m scripts.cli_app
+python -m scripts.app_web
 ```
-
 You’ll see something like:
-
 ```text
-[setup] Loading MotionQADataset...
-[setup] Loaded dataset with N clips.
-[config] USE_LLM=False (offline heuristic + rule-based answers).
-
-[clips] There are N clips (0 to N-1).
-Enter a clip index to inspect (or 'q' to quit): 0
+Running on local URL:  http://127.0.0.1:7860
 ```
 
-Flow:
+Open that URL in your browser.
 
-1. **Select a clip index** (`0` to `N-1`).
+There you can:
 
-2. See clip summary:
+1. **Upload a short video** clip of a person moving (walking, sitting, etc.).
+2. **Enter a question**, e.g.:
+    - “Does the person move more forward or sideways?”
+    - “How many times does the person sit down?”
+    - “How far does the person travel from start to end?”
+    - “Does the person mostly stay in place, or move a lot?”
+    - “How long is this motion clip in seconds?”    
+3. Click **Submit** to see the answer.
+    
 
-   ```text
-   [clip] Index: 0
-   [clip] ID: babel_clip_0000
-   [clip] Motion shape: (T, J, 3)
-   [clip] Summary: T = ..., J = 1 joint(s), net LR displacement ≈ ..., FB displacement ≈ ...
-   ```
+Internally, the app
+1. Extracts root trajectory via MediaPipe.
+2. Computes motion features (`compute_features_with_events`).
+3. Uses the planner (heuristic or LLM) to pick a tool.
+4. Runs the module and formats the answer.
+    
 
-3. Optionally view a **2D root trajectory plot**:
-
-   ```text
-   View a 2D plot of the root trajectory? [y/N]:
-   ```
-
-   If you type `y`, a matplotlib window shows `x` vs `z` trajectory.
-
-4. Choose a question:
-
-   ```text
-   [question] Default question from metadata:
-     "Does the person move more forward or sideways?"
-
-   Question options:
-     1) Use this metadata question
-     2) Choose from pre-written questions
-     3) Type my own question
-   ```
-
-   If you choose option 2, you’ll see:
-
-   ```text
-   [pre-written questions]
-     0: Does the person move more forward or sideways?
-     1: Does the person move more left or right?
-     2: How many times does the person sit down?
-     3: How far does the person travel from start to end?
-     4: Does the person mostly stay in place, or move a lot?
-     5: How long is this motion clip in seconds?
-   ```
-
-5. The system runs:
-
-   * Planner → picks tool
-   * Module → computes result
-   * Answerer → prints formatted answer
-
-6. After finishing, you can select another clip or quit.
+> You might see a warning like  
+> `W0000 ... Feedback manager requires a model with a single signature inference. Disabling support for feedback tensors.`  
+> This is a **non-fatal MediaPipe warning** and can be safely ignored.
 
 ---
 
-## 8. LLM Integration (Optional / Future Use)
+## 7. Configuration & LLM Integration (Optional)
 
-If you later have OpenAI API access and want to enable the LLM-based planner/answerer:
+Config is handled in `motion_qa/config.py` via environment variables (`.env`):
+```env
+USE_LLM=false
+PLANNER_MODEL=gpt-4.1-mini
+ANSWER_MODEL=gpt-4.1-mini
+OPENAI_API_KEY=sk-...
+```
 
-1. Create a `.env` file:
-
-   ```env
-   OPENAI_API_KEY=sk-...
-   USE_LLM=true
-   PLANNER_MODEL=gpt-4.1-mini      # or any suitable chat model
-   ANSWER_MODEL=gpt-4.1-mini
-   ```
-
-2. Make sure `python-dotenv` and `openai` are installed.
-
-3. Run the CLI or demo as before:
-
-   ```bash
-   python -m scripts.cli_app
-   ```
-
-The project will:
-
-* Use `plan_from_question_llm` instead of the heuristic planner.
-* Use `answer_with_llm` instead of `format_answer` where possible.
-* Fall back to heuristic behavior if any error occurs.
+- When `USE_LLM=false` (default):
+    - Planner → `plan_from_question` (heuristic).
+    - Answerer → `format_answer` (rule-based).
+    - No OpenAI calls are made.
+        
+- When `USE_LLM=true`:
+    - Planner → `plan_from_question_llm` (with OpenAI).
+    - Answerer → `answer_with_llm`.
+    - Both will fall back to heuristic / rule-based if any error or missing key occurs.
+        
 
 ---
 
-## 9. Limitations & Future Work
+## 8. Limitations & Future Work
 
 **Current limitations:**
-
-* Uses only the **root joint** (`trans`) from AMASS, not full skeleton joints.
-* **No learned model** is trained yet; everything is rule-based / feature-based.
-* BABEL labels are not yet fully integrated (only mirrored structurally).
-* `most_active_limb` is limited in meaning until multi-joint data is used.
+- Uses only a **single root joint** `(T, 1, 3)`:
+    - From AMASS (`trans`) or from MediaPipe hip midpoint.
+    - Limb-related tools like `most_active_limb` are placeholders until multi-joint skeletons are integrated.
+    
+- **No training** yet:
+    - All modules are rule-based (no learned models trained on this code).
+        
+- BABEL is not yet directly used for labels/text beyond mirroring its structure.
+    
 
 **Future directions:**
-
-* Add **SMPL-H-based joint reconstruction** to get full `(T, J, 3)` skeletons.
-* Make `most_active_limb` and other limb-based tools fully meaningful.
-* Train a small **classifier** (e.g., movement intensity, action type) on top of the features → make this clearly a Machine Learning project.
-* Use BABEL text for:
-
-  * richer question templates,
-  * training a simple text–motion classifier/regressor.
-* Build a **web UI** (e.g., Streamlit/Gradio) as a richer front-end.
-
+- Reconstruct full multi-joint skeletons using SMPL-H on AMASS.
+- Use all MediaPipe joints for richer video motion representation `(T, J, 3)`.
+- Make `most_active_limb` and other limb-focused tools truly meaningful.
+- Train a **small classifier** on top of features (e.g., movement intensity or action type) to add explicit ML.
+- Deeper integration of BABEL text (e.g., question templates or supervision).
+- Richer web UI:
+    - Skeleton overlays,
+    - timelines,
+    - multiple questions per clip.
+        
 ---
-
-## 10. How to Talk About This Project
-
-Example blurb for a CV / portfolio:
-
-> Implemented a CPU-only Motion Question Answering prototype on AMASS CMU data.
-> Built a preprocessing pipeline that extracts root joint trajectories from AMASS `.npz` files, computes interpretable motion features (displacement, sit events, duration), and generates a small BABEL-style QA dataset. Designed a modular toolbox of motion-analysis functions (dominant direction, sit counts, displacement, movement category, duration) with a planner–answerer architecture and an interactive terminal UI, with optional LLM integration for tool selection and answer generation.
-
----
-
-
