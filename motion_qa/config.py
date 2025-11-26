@@ -5,14 +5,24 @@ from __future__ import annotations
 import os
 from dotenv import load_dotenv
 
-# Load environment variables from .env if present
+# Load .env file (if present) into environment
 load_dotenv()
 
-# --- Main toggle flag -------------------------------------------------
-# If True  -> use LLM-based planner + answerer (requires API key + quota)
-# If False -> use heuristic planner + rule-based answerer (no API calls)
-USE_LLM: bool = os.getenv("USE_LLM", "false").lower() == "true"
+# --- OpenAI config ---
 
-# Optional: you can configure model names via env, or ignore these for now
-PLANNER_MODEL: str = os.getenv("PLANNER_MODEL", "gpt-4o-mini")
-ANSWER_MODEL: str = os.getenv("ANSWER_MODEL", "gpt-4o-mini")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    print("[config] WARNING: OPENAI_API_KEY is not set. LLM calls will fail.")
+
+# Models for planner + answerer (can be the same)
+PLANNER_MODEL = os.getenv("PLANNER_MODEL", "gpt-4.1-mini")
+ANSWER_MODEL = os.getenv("ANSWER_MODEL", "gpt-4.1-mini")
+
+# Flag to control whether we *try* to use LLM
+# When True, code uses LLM planner + answerer, with heuristic fallback on errors.
+USE_LLM = os.getenv("USE_LLM", "false").lower() == "true"
+
+print(
+    f"[config] USE_LLM={USE_LLM}, "
+    f"PLANNER_MODEL={PLANNER_MODEL}, ANSWER_MODEL={ANSWER_MODEL}"
+)
