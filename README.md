@@ -21,7 +21,7 @@ A small project that lets you **ask questions about human movement** over short 
 ---
 
 ## Output Video
-<video controls src="Motion QA Demo.mp4" title="Title"></video>
+![alt text](<MotionQA Demo.gif>)
 
 ## Rough architecture
 
