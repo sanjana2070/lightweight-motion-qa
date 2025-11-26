@@ -153,29 +153,32 @@ def main() -> None:
         "- How long is this motion clip in seconds?"
     )
 
-    # NOTE: no 'type=' argument here to keep it compatible with your gradio version
-    video_input = gr.Video(
-        label="Upload a short motion video",
-    )
-    question_input = gr.Textbox(
-        lines=2,
-        label="Question about this motion",
-        placeholder="e.g., Does the person move more forward or sideways?",
-    )
-    answer_output = gr.Textbox(
-        lines=5,
-        label="Answer",
-    )
+    with gr.Blocks(title="Lightweight Motion QA on Video") as demo:
+        gr.Markdown(f"### Lightweight Motion QA on Video\n\n{description}")
 
-    iface = gr.Interface(
-        fn=qa_on_video,
-        inputs=[video_input, question_input],
-        outputs=answer_output,
-        title="Lightweight Motion QA on Video",
-        description=description,
-    )
+        with gr.Row():
+            video_input = gr.Video(
+                label="Upload a short motion video",
+            )
 
-    iface.launch()
+        question_input = gr.Textbox(
+            lines=2,
+            label="Question about this motion",
+            placeholder="e.g., Does the person move more forward or sideways?",
+        )
+        answer_output = gr.Textbox(
+            lines=5,
+            label="Answer",
+        )
+        submit_btn = gr.Button("Ask")
+
+        submit_btn.click(
+            fn=qa_on_video,
+            inputs=[video_input, question_input],
+            outputs=answer_output,
+        )
+
+    demo.launch()
 
 
 if __name__ == "__main__":

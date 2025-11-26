@@ -222,39 +222,11 @@ Launch the web UI:
 ```bash
 python -m scripts.app_web
 ```
-You’ll see something like:
-```text
-Running on local URL:  http://127.0.0.1:7860
-```
+## Output
+![alt text](Output1.png)
+![alt text](Output2.png)
 
-Open that URL in your browser.
-
-There you can:
-
-1. **Upload a short video** clip of a person moving (walking, sitting, etc.).
-2. **Enter a question**, e.g.:
-    - “Does the person move more forward or sideways?”
-    - “How many times does the person sit down?”
-    - “How far does the person travel from start to end?”
-    - “Does the person mostly stay in place, or move a lot?”
-    - “How long is this motion clip in seconds?”    
-3. Click **Submit** to see the answer.
-    
-
-Internally, the app
-1. Extracts root trajectory via MediaPipe.
-2. Computes motion features (`compute_features_with_events`).
-3. Uses the planner (heuristic or LLM) to pick a tool.
-4. Runs the module and formats the answer.
-    
-
-> You might see a warning like  
-> `W0000 ... Feedback manager requires a model with a single signature inference. Disabling support for feedback tensors.`  
-> This is a **non-fatal MediaPipe warning** and can be safely ignored.
-
----
-
-## 7. Configuration & LLM Integration (Optional)
+## 6. Configuration & LLM Integration
 
 Config is handled in `motion_qa/config.py` via environment variables (`.env`):
 ```env
@@ -277,7 +249,7 @@ OPENAI_API_KEY=sk-...
 
 ---
 
-## 8. Limitations & Future Work
+## 7. Limitations & Future Work
 
 **Current limitations:**
 - Uses only a **single root joint** `(T, 1, 3)`:
