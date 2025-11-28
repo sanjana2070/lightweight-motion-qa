@@ -20,11 +20,15 @@ A small project that lets you **ask questions about human movement** over short 
 
 ---
 
-## Output Video
+## Output Videos
+### Output 1
 ![alt text](<MotionQA Demo.gif>)
 
-## Flowchart
-![alt text](Flowchart.png)
+### Output 2
+![alt text](<Output 2.gif>)
+
+## System Design
+![alt text](<System Design.png>)
 
 ## Rough architecture
 
@@ -53,11 +57,11 @@ A small project that lets you **ask questions about human movement** over short 
    # macOS / Linux:
    # source venv/bin/activate
   ```
-2. Install dependencies
+2. Install dependencies:
   ```bash
   pip install torch numpy matplotlib mediapipe opencv-python gradio python-dotenv openai
 
-3. OpenAI + Config
+3. OpenAI + Config:
   Create an .env file in the project root and add the following:
   ```bash
   OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx
@@ -66,7 +70,7 @@ A small project that lets you **ask questions about human movement** over short 
   ANSWER_MODEL=gpt-4.1-mini
   ```
 
-4. AMASS data (for the dataset/CLI part)
+4. AMASS data (for the dataset/CLI part):
 Download the AMASS and BABEL data and add them in a new folder "data". Then run the following command:
 ```bash
   python -m scripts.preprocess_babel_subset
@@ -83,7 +87,7 @@ data/babel_subset/metadata.json
 python -m scripts.app_web
 ```
 
-6. Future steps
+6. Future steps:
 This is intended as a lightweight prototype for LLM-backed motion understanding, and a base one can extend with richer skeletons, more tools, and eventually one's own learned models.
 
 
