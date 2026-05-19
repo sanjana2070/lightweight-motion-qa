@@ -9,8 +9,9 @@ import torch
 import gradio as gr
 
 from motion_qa.video_pose import extract_root_trajectory_from_video
-from motion_qa.features import compute_features_with_events
-from motion_qa import modules, config
+from motion_qa.features import compute_basic_features
+from motion_qa import config
+from motion_qa.registry import MODULE_MAP
 from motion_qa.planner import plan_from_question, plan_from_question_llm
 from motion_qa.answerer import format_answer, answer_with_llm
 
@@ -73,68 +74,39 @@ def qa_on_video(video: Any, question: str) -> str:
         return "Please enter a question about the motion."
 
     try:
-        # 1) Extract motion from video -> (T, 1, 3)
-        motion_np = extract_root_trajectory_from_video(video_path)
-        motion = torch.from_numpy(motion_np)  # (T, 1, 3)
+        # 1) Extract pose from video -> (T, 17, 3) and real FPS
+        motion_np, fps = extract_root_trajectory_from_video(video_path)
+        motion = torch.from_numpy(motion_np)
 
-        # 2) Compute features (same as with AMASS)
-        features = compute_features_with_events(
-            motion,
-            fps=30.0,   # approximate; adjust if you know the real FPS
-            hip_index=0,
-        )
+        # 2) Compute features (pose-based spatial/temporal modules)
+        features = compute_basic_features(motion, fps=fps)
 
-        # 3) Map tool names to module functions
-        module_map = {
-            "count_sit_events": modules.count_sit_events,
-            "dominant_direction": modules.dominant_direction,
-            "most_active_limb": modules.most_active_limb,
-            "global_displacement": modules.global_displacement,
-            "displacement_category": modules.displacement_category,
-            "clip_duration": modules.clip_duration,
-        }
-        tool_names = list(module_map.keys())
-
-        # 4) Choose tool: LLM or heuristic planner
+        # 3) Choose tool: LLM or heuristic planner
+        tool_names = list(MODULE_MAP.keys())
         if config.USE_LLM:
-            print("[web] USE_LLM=True -> using LLM-based planner + answerer.")
-            plan = plan_from_question_llm(
-                question,
-                tool_names,
-                model=config.PLANNER_MODEL,
-            )
+            plan = plan_from_question_llm(question, tool_names)
         else:
-            print("[web] USE_LLM=False -> using heuristic planner + rule-based answerer.")
-            plan = plan_from_question(
-                question,
-                tool_names,
-            )
+            plan = plan_from_question(question, tool_names)
 
         tool_name = plan["tool"]
-        params = plan.get("params", {})
+        # Pass video_path in params so classify_dance_style can access raw frames
+        params = {**plan.get("params", {}), "video_path": video_path, "fps": fps}
 
-        if tool_name not in module_map:
+        if tool_name not in MODULE_MAP:
             return f"Planner chose unknown tool '{tool_name}'."
 
-        # 5) Run the selected analysis tool
-        module_fn = module_map[tool_name]
-        raw_answer = module_fn(motion, features, params=params)
+        # 4) Run the selected analysis tool
+        raw_answer = MODULE_MAP[tool_name](motion, features, params=params)
 
-        # 6) Format final answer
+        # 5) Format final answer
         if config.USE_LLM:
-            final_text = answer_with_llm(
-                question,
-                tool_name,
-                raw_answer,
-                model=config.ANSWER_MODEL,
-            )
+            final_text = answer_with_llm(question, tool_name, raw_answer)
         else:
             final_text = format_answer(question, tool_name, raw_answer)
 
         return final_text
 
     except Exception as e:
-        # Surface any errors nicely on the page
         return f"Error while processing video: {e}"
 
 
@@ -143,28 +115,31 @@ def main() -> None:
     Launch the Gradio web app.
     """
     description = (
-        "Upload a short video of a person moving (walking, sitting, etc.), "
-        "then ask a question about the motion.\n\n"
+        "Upload a short dance video, then ask a question about the movement.\n\n"
         "Examples:\n"
-        "- Does the person move more forward or sideways?\n"
-        "- How many times does the person sit down?\n"
-        "- How far does the person travel from start to end?\n"
-        "- Does the person mostly stay in place, or move a lot?\n"
-        "- How long is this motion clip in seconds?"
+        "- Does the performer freeze at any point?\n"
+        "- Is jacking present in this clip?\n"
+        "- How rhythmically regular is the movement?\n"
+        "- What move is performed at the start?\n"
+        "- Which limb is most active?\n"
+        "- Does the performer travel across the floor or stay in place?\n"
+        "- How long is this clip in seconds?"
     )
 
-    with gr.Blocks(title="Lightweight Motion QA on Video") as demo:
-        gr.Markdown(f"### Lightweight Motion QA on Video\n\n{description}")
+    with gr.Blocks(title="Dance QA") as demo:
+        gr.Markdown(f"### Dance QA\n\n{description}")
 
         with gr.Row():
             video_input = gr.Video(
-                label="Upload a short motion video",
+                label="Upload or record a dance video clip",
+                format="mp4",
+                sources=["webcam", "upload"],
             )
 
         question_input = gr.Textbox(
             lines=2,
-            label="Question about this motion",
-            placeholder="e.g., Does the person move more forward or sideways?",
+            label="Question about this dance",
+            placeholder="e.g., Does the performer freeze at any point?",
         )
         answer_output = gr.Textbox(
             lines=5,

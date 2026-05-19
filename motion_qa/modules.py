@@ -6,7 +6,7 @@ from typing import Dict, Any, Optional
 
 import torch
 
-from .features import compute_basic_features, compute_features_with_events
+from .features import compute_basic_features
 
 
 # NOTE: These joint groups are example indices.
@@ -194,59 +194,6 @@ def displacement_category(
 
 
 # ---------------------------------------------------------------------
-# Sit / squat events
-# ---------------------------------------------------------------------
-def count_sit_events(
-    motion: torch.Tensor,
-    features: Optional[Dict[str, Any]] = None,
-    params: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """
-    Count how many sit/squat-like events occur in the motion.
-
-    Uses the `sit_event_count` returned by compute_features_with_events().
-    You can override hip_index or fps via params.
-
-    Parameters
-    ----------
-    params : dict (optional)
-        {
-          "fps": float,
-          "hip_index": int
-        }
-
-    Returns
-    -------
-    result : dict
-        {
-          "type": "count",
-          "value": int
-        }
-    """
-    params = params or {}
-    fps = params.get("fps", 30.0)
-    hip_index = params.get("hip_index", 0)
-
-    if features is None or "sit_event_count" not in features:
-        features = compute_features_with_events(
-            motion,
-            fps=fps,
-            hip_index=hip_index,
-        )
-
-    sit_count = int(features["sit_event_count"])
-
-    return {
-        "type": "count",
-        "value": sit_count,
-        "details": {
-            "fps": fps,
-            "hip_index": hip_index,
-        },
-    }
-
-
-# ---------------------------------------------------------------------
 # Clip duration
 # ---------------------------------------------------------------------
 def clip_duration(
@@ -288,6 +235,243 @@ def clip_duration(
         "details": {
             "T": int(T),
             "fps": fps,
+        },
+    }
+
+
+# ---------------------------------------------------------------------
+# Dance-specific modules (Hip-Hop / House)
+# ---------------------------------------------------------------------
+
+def detect_freeze(
+    motion: torch.Tensor,
+    features: Optional[Dict[str, Any]] = None,
+    params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Detect freeze events — moments where all joints are nearly stationary.
+
+    A freeze is detected when the summed per-joint velocity across all joints
+    stays below `velocity_threshold` for at least `min_duration_sec` seconds.
+
+    Returns
+    -------
+    dict with:
+      - value : int  — number of freeze events
+      - details.events : list of {start_frame, end_frame, duration_sec}
+    """
+    params = params or {}
+    fps = float(params.get("fps", 30.0))
+    velocity_threshold = float(params.get("velocity_threshold", 0.02))
+    min_frames = max(1, int(params.get("min_duration_sec", 0.25) * fps))
+
+    T, J, _ = motion.shape
+    if T < 2:
+        return {"type": "event_list", "value": 0, "details": {"events": []}}
+
+    # Per-frame total velocity: sum of L2 norms across all joints
+    diff = motion[1:] - motion[:-1]  # (T-1, J, 3)
+    vel = diff.norm(dim=-1).sum(dim=-1)  # (T-1,)
+
+    is_frozen = (vel < velocity_threshold).tolist()
+
+    events: list[Dict[str, Any]] = []
+    in_freeze = False
+    start = 0
+    for i, frozen in enumerate(is_frozen):
+        if frozen and not in_freeze:
+            in_freeze = True
+            start = i
+        elif not frozen and in_freeze:
+            in_freeze = False
+            length = i - start
+            if length >= min_frames:
+                events.append({
+                    "start_frame": start,
+                    "end_frame": i,
+                    "duration_sec": round(length / fps, 3),
+                })
+    # Handle freeze that runs to the end
+    if in_freeze:
+        length = len(is_frozen) - start
+        if length >= min_frames:
+            events.append({
+                "start_frame": start,
+                "end_frame": len(is_frozen),
+                "duration_sec": round(length / fps, 3),
+            })
+
+    return {
+        "type": "event_list",
+        "value": len(events),
+        "details": {"events": events},
+    }
+
+
+def detect_jacking(
+    motion: torch.Tensor,
+    features: Optional[Dict[str, Any]] = None,
+    params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Detect House dance jacking — rhythmic hip oscillation at ~1.9–2.1 Hz.
+
+    Uses FFT on the left-hip (joint 11) y-coordinate. If the dominant
+    frequency falls in the jacking range the result is True.
+
+    Returns
+    -------
+    dict with:
+      - value : bool  — True if jacking rhythm detected
+      - details.dominant_freq_hz : float
+      - details.power_ratio : float  — fraction of total power at dominant freq
+    """
+    params = params or {}
+    fps = float(params.get("fps", 30.0))
+    jack_lo = float(params.get("jack_freq_lo", 1.7))
+    jack_hi = float(params.get("jack_freq_hi", 2.3))
+
+    T = motion.shape[0]
+    hip_y = motion[:, 11, 1].detach().cpu().numpy()  # left hip y
+    hip_y = hip_y - hip_y.mean()  # remove DC
+
+    if T < 16:
+        return {
+            "type": "categorical",
+            "value": False,
+            "details": {"dominant_freq_hz": 0.0, "power_ratio": 0.0},
+        }
+
+    import numpy as _np
+    freqs = _np.fft.rfftfreq(T, d=1.0 / fps)
+    spectrum = _np.abs(_np.fft.rfft(hip_y)) ** 2
+    total_power = float(spectrum.sum()) or 1.0
+
+    dominant_idx = int(spectrum.argmax())
+    dominant_freq = float(freqs[dominant_idx])
+    dominant_power = float(spectrum[dominant_idx])
+
+    is_jacking = jack_lo <= dominant_freq <= jack_hi
+
+    return {
+        "type": "categorical",
+        "value": bool(is_jacking),
+        "details": {
+            "dominant_freq_hz": round(dominant_freq, 3),
+            "power_ratio": round(dominant_power / total_power, 4),
+        },
+    }
+
+
+def compute_rhythm_regularity(
+    motion: torch.Tensor,
+    features: Optional[Dict[str, Any]] = None,
+    params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Measure how rhythmically regular the movement is via autocorrelation
+    of the root-joint speed signal.
+
+    A score close to 1.0 means highly periodic (regular, on-beat movement).
+    A score close to 0.0 means irregular / arrhythmic.
+
+    Returns
+    -------
+    dict with:
+      - value : float [0, 1]  — regularity score
+      - details.peak_period_frames : int  — estimated cycle length in frames
+    """
+    params = params or {}
+    T = motion.shape[0]
+
+    if T < 4:
+        return {
+            "type": "scalar",
+            "value": 0.0,
+            "details": {"peak_period_frames": 0},
+        }
+
+    import numpy as _np
+    root = motion[:, 0, :].detach().cpu().numpy()  # (T, 3)
+    speed = _np.linalg.norm(_np.diff(root, axis=0), axis=1)  # (T-1,)
+    speed = speed - speed.mean()
+    if speed.std() < 1e-9:
+        return {"type": "scalar", "value": 0.0, "details": {"peak_period_frames": 0}}
+
+    # Normalised autocorrelation
+    n = len(speed)
+    acf = _np.correlate(speed, speed, mode="full")[n - 1:]  # (n,)
+    acf /= acf[0]  # normalize
+
+    # Find first significant peak after lag=2 (ignore zero-lag and its neighbours)
+    search = acf[2:]
+    if len(search) == 0:
+        return {"type": "scalar", "value": 0.0, "details": {"peak_period_frames": 0}}
+
+    peak_lag = int(search.argmax()) + 2
+    peak_value = float(search.max())
+
+    # Clamp to [0, 1]
+    score = max(0.0, min(1.0, peak_value))
+
+    return {
+        "type": "scalar",
+        "value": round(score, 4),
+        "details": {"peak_period_frames": peak_lag},
+    }
+
+
+# ---------------------------------------------------------------------
+# Dance style classification (X-CLIP, zero-shot)
+# ---------------------------------------------------------------------
+
+def classify_dance_style(
+    motion: torch.Tensor,
+    features: Optional[Dict[str, Any]] = None,
+    params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Classify the dance genre/style of a video clip using X-CLIP (zero-shot).
+
+    Requires `video_path` in params — the pose tensor is not used here;
+    X-CLIP operates directly on raw video frames.
+
+    Parameters
+    ----------
+    params : dict
+        {
+          "video_path": str  — path to the video file (required)
+          "num_frames": int  — frames to sample (default 8)
+        }
+
+    Returns
+    -------
+    dict with:
+      - type      : "categorical"
+      - value     : str   — best matching genre (e.g. "Breaking")
+      - details   : {confidence: float, scores: {genre: float, ...}}
+    """
+    params = params or {}
+    video_path = params.get("video_path")
+    num_frames = int(params.get("num_frames", 8))
+
+    if not video_path:
+        return {
+            "type": "categorical",
+            "value": "unknown",
+            "details": {"error": "video_path not provided in params"},
+        }
+
+    from motion_qa.hf_video import classify_from_video
+    from motion_qa.config import AIST_GENRE_LABELS
+
+    result = classify_from_video(video_path, AIST_GENRE_LABELS, num_frames=num_frames)
+    return {
+        "type": "categorical",
+        "value": result["best_label"],
+        "details": {
+            "confidence": result["confidence"],
+            "scores": result["scores"],
         },
     }
 

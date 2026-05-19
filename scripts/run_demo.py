@@ -8,9 +8,8 @@ import torch
 
 from motion_qa.datasets import MotionQADataset
 from motion_qa.features import compute_features_with_events
-from motion_qa import modules, config  # config has USE_LLM flag
-
-# We import both LLM and non-LLM versions; choose at runtime via config.USE_LLM
+from motion_qa import config
+from motion_qa.registry import MODULE_MAP
 from motion_qa.planner import plan_from_question, plan_from_question_llm
 from motion_qa.answerer import format_answer, answer_with_llm
 
@@ -62,26 +61,18 @@ def main() -> None:
         hip_index=0,  # adjust if your skeleton uses a different hip index
     )
 
-    # 4) Map tool names to module functions
-    module_map = {
-        "count_sit_events": modules.count_sit_events,
-        "dominant_direction": modules.dominant_direction,
-        "most_active_limb": modules.most_active_limb,
-    }
-
-    # 5) Choose planner based on config.USE_LLM
+    # 4) Choose planner based on config.USE_LLM
     if config.USE_LLM:
         print("[config] USE_LLM=True -> using LLM-based planner + answerer.")
         plan = plan_from_question_llm(
             question or "",
-            list(module_map.keys()),
-            model=config.PLANNER_MODEL,
+            list(MODULE_MAP.keys()),
         )
     else:
         print("[config] USE_LLM=False -> using heuristic planner + rule-based answerer.")
         plan = plan_from_question(
             question or "",
-            list(module_map.keys()),
+            list(MODULE_MAP.keys()),
         )
 
     tool_name = plan["tool"]
@@ -89,7 +80,7 @@ def main() -> None:
 
     print(f"[info] Planner chose tool: {tool_name} with params={params}")
 
-    module_fn = module_map.get(tool_name)
+    module_fn = MODULE_MAP.get(tool_name)
     if module_fn is None:
         print(f"[error] No module implemented for tool_name={tool_name}")
         return
@@ -101,12 +92,7 @@ def main() -> None:
     # 7) Turn raw answer into human-readable text
     print("\n" + "-" * 60)
     if config.USE_LLM:
-        final_text = answer_with_llm(
-            question,
-            tool_name,
-            raw_answer,
-            model=config.ANSWER_MODEL,
-        )
+        final_text = answer_with_llm(question, tool_name, raw_answer)
     else:
         final_text = format_answer(question, tool_name, raw_answer)
 

@@ -1,6 +1,13 @@
 torch
 numpy
-tqdm
 matplotlib
 python-dotenv
-openai
+opencv-python>=4.8
+gradio>=4.0
+# HuggingFace stack — local LLM (Phi-3), ViTPose pose extraction, X-CLIP video classification
+transformers>=4.40
+accelerate>=0.29
+bitsandbytes>=0.43
+ultralytics>=8.0
+Pillow>=10.0
+decord>=0.6

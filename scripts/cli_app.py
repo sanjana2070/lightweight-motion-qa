@@ -8,12 +8,14 @@ from typing import Optional, List
 import torch
 
 from motion_qa.datasets import MotionQADataset
-from motion_qa.features import compute_features_with_events
-from motion_qa import modules, config
+from motion_qa.features import compute_basic_features
+from motion_qa import config
+from motion_qa.registry import MODULE_MAP
+from motion_qa.viz import plot_root_trajectory_2d
 from motion_qa.planner import plan_from_question, plan_from_question_llm
 from motion_qa.answerer import format_answer, answer_with_llm
 
-DATA_ROOT = Path("data") / "babel_subset"
+DATA_ROOT = Path("data") / "aist"
 MOTION_DIR = DATA_ROOT / "motions"
 META_PATH = DATA_ROOT / "metadata.json"
 
@@ -35,12 +37,12 @@ def load_dataset() -> MotionQADataset:
     if not META_PATH.exists():
         raise FileNotFoundError(
             f"Metadata file not found: {META_PATH}\n"
-            "Hint: run `python -m scripts.preprocess_babel_subset` first."
+            "Hint: run `python -m scripts.preprocess_aist` first."
         )
     if not MOTION_DIR.exists():
         raise FileNotFoundError(
             f"Motion directory not found: {MOTION_DIR}\n"
-            "Hint: run `python -m scripts.preprocess_babel_subset` first."
+            "Hint: run `python -m scripts.preprocess_aist` first."
         )
 
     ds = MotionQADataset(META_PATH, MOTION_DIR)
@@ -75,28 +77,6 @@ def choose_clip_index(num_clips: int) -> Optional[int]:
             return idx
         else:
             print("[warn] Index out of range.")
-
-
-def visualize_motion_2d(motion: torch.Tensor, clip_id: str) -> None:
-    """
-    Simple 2D visualization of the root joint trajectory (x vs z).
-    Pops up a matplotlib window.
-    """
-    import matplotlib.pyplot as plt
-
-    # motion: (T, J, 3) – we use joint 0 as root
-    root = motion[:, 0, :].detach().cpu().numpy()
-    x = root[:, 0]  # left-right
-    z = root[:, 2]  # forward-back
-
-    plt.figure()
-    plt.plot(x, z, marker=".")
-    plt.title(f"Root trajectory (x vs z) - {clip_id}")
-    plt.xlabel("x (left-right)")
-    plt.ylabel("z (forward-back)")
-    plt.axis("equal")
-    plt.grid(True)
-    plt.show()
 
 
 def summarize_motion(motion: torch.Tensor) -> str:
@@ -198,7 +178,7 @@ def run_qa_for_item(ds: MotionQADataset, idx: int) -> None:
         "View a 2D plot of the root trajectory? [y/n]: "
     ).strip().lower()
     if view_choice in {"y", "yes"}:
-        visualize_motion_2d(motion, clip_id)
+        plot_root_trajectory_2d(motion, clip_id)
 
     # Let the user pick or type a question
     question = choose_question(default_question)
@@ -207,43 +187,24 @@ def run_qa_for_item(ds: MotionQADataset, idx: int) -> None:
     print(f"[info] Final question: {question!r}")
 
     # Compute features
-    features = compute_features_with_events(
-        motion,
-        fps=30.0,
-        hip_index=0,  # adjust if needed for different skeletons
-    )
-
-    # Map tools (include the new ones as well)
-    module_map = {
-        "count_sit_events": modules.count_sit_events,
-        "dominant_direction": modules.dominant_direction,
-        "most_active_limb": modules.most_active_limb,
-        "global_displacement": modules.global_displacement,
-        "displacement_category": modules.displacement_category,
-        "clip_duration": modules.clip_duration,
-    }
+    features = compute_basic_features(motion, fps=30.0)
 
     # Planner: LLM or heuristic based on config.USE_LLM
     if config.USE_LLM:
         print("[config] USE_LLM=True -> using LLM-based planner + answerer.")
-        plan = plan_from_question_llm(
-            question or "",
-            list(module_map.keys()),
-            model=config.PLANNER_MODEL,
-        )
+        plan = plan_from_question_llm(question or "", list(MODULE_MAP.keys()))
     else:
         print("[config] USE_LLM=False -> using heuristic planner + rule-based answerer.")
-        plan = plan_from_question(
-            question or "",
-            list(module_map.keys()),
-        )
+        plan = plan_from_question(question or "", list(MODULE_MAP.keys()))
 
     tool_name = plan["tool"]
-    params = plan.get("params", {})
+    # Include video_path from raw_item so classify_dance_style can read frames
+    video_path = item.get("raw_item", {}).get("video_path", "")
+    params = {**plan.get("params", {}), "video_path": video_path, "fps": 30.0}
 
     print(f"[info] Planner chose tool: {tool_name} with params={params}")
 
-    module_fn = module_map.get(tool_name)
+    module_fn = MODULE_MAP.get(tool_name)
     if module_fn is None:
         print(f"[error] No module implemented for tool_name={tool_name}")
         return
@@ -255,13 +216,7 @@ def run_qa_for_item(ds: MotionQADataset, idx: int) -> None:
     # Format answer
     print("\n" + "-" * 60)
     if config.USE_LLM:
-        final_text = answer_with_llm(
-            question,
-            tool_name,
-            raw_answer,
-            model=config.ANSWER_MODEL,
-        )
-        # If API quota is exhausted, answer_with_llm will fall back to format_answer.
+        final_text = answer_with_llm(question, tool_name, raw_answer)
     else:
         final_text = format_answer(question, tool_name, raw_answer)
 

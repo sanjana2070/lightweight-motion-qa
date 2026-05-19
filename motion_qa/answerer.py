@@ -5,11 +5,6 @@ from __future__ import annotations
 from typing import Dict, Any
 import json
 
-try:
-    from openai import OpenAI  # Optional; we fall back gracefully if missing
-except ImportError:
-    OpenAI = None  # type: ignore
-
 
 def format_answer(
     question: str,
@@ -37,6 +32,20 @@ def format_answer(
     details = raw_answer.get("details", {}) or {}
     value = raw_answer.get("value", None)
 
+    # ------------- classify_dance_style -------------
+    if tool_name == "classify_dance_style":
+        genre = str(value) if value is not None else "unknown"
+        confidence = float(details.get("confidence", 0.0))
+        scores = details.get("scores", {})
+        top3 = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:3]
+        top3_str = ", ".join(f"{g} ({p*100:.1f}%)" for g, p in top3)
+        ans = (
+            f"The dance style is most likely **{genre}** "
+            f"(confidence: {confidence*100:.1f}%). "
+            f"Top matches: {top3_str}."
+        )
+        return f"Q: {question}\nA: {ans}"
+
     # ------------- dominant_direction -------------
     if tool_name == "dominant_direction":
         direction = str(value) if value is not None else "unknown"
@@ -45,21 +54,15 @@ def format_answer(
 
         if direction == "stationary":
             ans = (
-                "The person stays roughly in place "
+                "The performer stays roughly in place "
                 f"(left-right displacement={lr:.2f}, forward-back={fb:.2f})."
             )
         else:
             ans = (
-                f"The person moves mostly {direction} "
+                f"The performer moves mostly {direction} "
                 f"(left-right displacement={lr:.2f}, forward-back={fb:.2f})."
             )
 
-        return f"Q: {question}\nA: {ans}"
-
-    # ------------- count_sit_events -------------
-    if tool_name == "count_sit_events":
-        count = int(value) if value is not None else 0
-        ans = f"The person sits down approximately {count} time(s) in this clip."
         return f"Q: {question}\nA: {ans}"
 
     # ------------- most_active_limb -------------
@@ -70,8 +73,8 @@ def format_answer(
             f"{name}={float(v):.2f}" for name, v in limb_activity.items()
         )
         ans = (
-            f"The most active limb appears to be the {limb.replace('_', ' ')}. "
-            f"(total movement per limb: {limb_summary})"
+            f"The most active limb is the {limb.replace('_', ' ')}. "
+            f"(movement per limb: {limb_summary})"
         )
         return f"Q: {question}\nA: {ans}"
 
@@ -82,7 +85,7 @@ def format_answer(
         dy = float(details.get("dy", 0.0))
         dz = float(details.get("dz", 0.0))
         ans = (
-            f"The person moves about {dist:.2f} units from start to end "
+            f"The performer travels about {dist:.2f} units from start to end "
             f"(Δx={dx:.2f}, Δy={dy:.2f}, Δz={dz:.2f})."
         )
         return f"Q: {question}\nA: {ans}"
@@ -93,12 +96,12 @@ def format_answer(
         dist = float(details.get("distance", 0.0))
         if category == "stationary":
             ans = (
-                f"The overall motion is {category} "
+                f"The performer dances mostly in place "
                 f"(total displacement ≈ {dist:.2f} units)."
             )
         else:
             ans = (
-                f"The person exhibits {category} movement overall "
+                f"The performer covers {category} floor space overall "
                 f"(total displacement ≈ {dist:.2f} units)."
             )
         return f"Q: {question}\nA: {ans}"
@@ -111,6 +114,53 @@ def format_answer(
         ans = (
             f"The clip is about {duration:.2f} seconds long "
             f"({T} frames at {fps:.1f} fps)."
+        )
+        return f"Q: {question}\nA: {ans}"
+
+    # ------------- detect_freeze -------------
+    if tool_name == "detect_freeze":
+        count = int(value) if value is not None else 0
+        events = details.get("events", [])
+        if count == 0:
+            ans = "No clear freeze events were detected in this clip."
+        else:
+            total_dur = sum(e.get("duration_sec", 0) for e in events)
+            ans = (
+                f"The performer freezes approximately {count} time(s) "
+                f"(total frozen time ≈ {total_dur:.2f}s)."
+            )
+        return f"Q: {question}\nA: {ans}"
+
+    # ------------- detect_jacking -------------
+    if tool_name == "detect_jacking":
+        is_jacking = bool(value)
+        freq = float(details.get("dominant_freq_hz", 0.0))
+        ratio = float(details.get("power_ratio", 0.0))
+        if is_jacking:
+            ans = (
+                f"Yes, jacking is detected — the hips oscillate at "
+                f"≈{freq:.2f} Hz ({ratio*100:.1f}% of total movement energy)."
+            )
+        else:
+            ans = (
+                f"No clear jacking groove detected (dominant hip frequency "
+                f"≈{freq:.2f} Hz, outside the 1.7–2.3 Hz jacking range)."
+            )
+        return f"Q: {question}\nA: {ans}"
+
+    # ------------- compute_rhythm_regularity -------------
+    if tool_name == "compute_rhythm_regularity":
+        score = float(value) if value is not None else 0.0
+        period = int(details.get("peak_period_frames", 0))
+        if score > 0.6:
+            label = "highly regular"
+        elif score > 0.3:
+            label = "moderately regular"
+        else:
+            label = "irregular"
+        ans = (
+            f"The movement is {label} (rhythm score = {score:.2f}). "
+            f"Estimated cycle length ≈ {period} frames."
         )
         return f"Q: {question}\nA: {ans}"
 
@@ -128,64 +178,38 @@ def answer_with_llm(
     question: str,
     tool_name: str,
     raw_answer: Dict[str, Any] | None,
-    model: str,
 ) -> str:
     """
-    LLM-based answerer.
-
-    Uses an LLM to turn (question + tool_name + raw_answer) into a concise,
-    natural-language answer.
-
-    If anything goes wrong (no client, API error, etc.), we fall back to
-    the rule-based `format_answer`.
+    LLM-based answerer using a local HuggingFace model (Phi-3-mini).
+    Falls back to rule-based formatter on any error.
     """
     raw_answer = raw_answer or {}
 
-    # If OpenAI is not available, or we don't want LLM, fall back immediately.
-    if OpenAI is None:
-        print("[answerer_llm] openai package not installed; falling back to rule-based answer.")
-        return format_answer(question, tool_name, raw_answer)
-
     try:
-        client = OpenAI()  # reads API key from environment
-    except Exception as e:
-        print(f"[answerer_llm] Error creating OpenAI client: {e}")
+        from motion_qa.hf_llm import generate
+    except ImportError as e:
+        print(f"[answerer_llm] hf_llm unavailable ({e}); using rule-based fallback.")
         return format_answer(question, tool_name, raw_answer)
-
-    system_msg = (
-        "You are a helpful assistant that explains the results of motion-analysis tools.\n"
-        "You are given a user's question about a human motion clip and the numeric\n"
-        "output of a specific tool (e.g., dominant_direction, count_sit_events, etc.).\n"
-        "Respond with a concise, clear answer (1-3 sentences) that directly addresses\n"
-        "the user's question using the tool's output. Do not mention the tool name\n"
-        "unless it is necessary."
-    )
 
     tool_json = json.dumps(
         {"tool_name": tool_name, "tool_output": raw_answer},
         indent=2,
         default=str,
     )
-
-    user_msg = (
+    system_prompt = (
+        "You are a helpful assistant that explains dance movement analysis results.\n"
+        "The subject is always a dancer or performer. Use dance-appropriate language.\n"
+        "Answer in 1–3 clear sentences using only the provided tool output.\n"
+        "Do not mention the tool name unless necessary."
+    )
+    user_prompt = (
         f"User question:\n{question}\n\n"
-        "Tool analysis output (JSON):\n"
-        f"{tool_json}\n\n"
-        "Using this information, answer the user's question clearly."
+        f"Tool output (JSON):\n{tool_json}\n\n"
+        "Answer the user's question clearly."
     )
 
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.2,
-        )
-        text = response.choices[0].message.content.strip()
-        return text
-
+        return generate(system_prompt, user_prompt, max_new_tokens=128, temperature=0.2)
     except Exception as e:
-        print(f"[answerer_llm] Error calling LLM: {e}")
+        print(f"[answerer_llm] LLM error ({e}); using rule-based fallback.")
         return format_answer(question, tool_name, raw_answer)
